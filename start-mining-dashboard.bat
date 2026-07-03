@@ -8,6 +8,8 @@ setlocal enabledelayedexpansion
 set CONTAINER_NAME=goofy_mcclintock
 set N8N_URL=http://localhost:5678
 set DASHBOARD_URL=%N8N_URL%/webhook/mining-dashboard
+REM Docker Desktop can take a while to fully init on a cold boot (WSL2 backend etc).
+set DOCKER_MAX_TRIES=150
 set MAX_TRIES=60
 
 echo === Solar Mining ROI Dashboard Starter ===
@@ -26,9 +28,9 @@ set /a TRIES=0
 docker info >nul 2>&1
 if not errorlevel 1 goto dockerready
 set /a TRIES+=1
-if !TRIES! GEQ %MAX_TRIES% (
-    echo Docker ist nach %MAX_TRIES% Versuchen nicht gestartet. Abbruch.
-    pause
+if !TRIES! GEQ %DOCKER_MAX_TRIES% (
+    echo Docker ist nach %DOCKER_MAX_TRIES% Versuchen nicht gestartet. Abbruch.
+    timeout /t 15 >nul
     exit /b 1
 )
 timeout /t 2 >nul
@@ -43,7 +45,7 @@ if errorlevel 1 (
     docker start %CONTAINER_NAME% >nul
     if errorlevel 1 (
         echo Konnte Container "%CONTAINER_NAME%" nicht starten. Existiert er? ^(docker ps -a^)
-        pause
+        timeout /t 15 >nul
         exit /b 1
     )
 ) else (
@@ -61,7 +63,7 @@ set /a TRIES+=1
 if !TRIES! GEQ %MAX_TRIES% (
     echo n8n antwortet nach %MAX_TRIES% Versuchen nicht. Abbruch.
     del "%TEMP%\n8n_status.txt" >nul 2>&1
-    pause
+    timeout /t 15 >nul
     exit /b 1
 )
 timeout /t 2 >nul

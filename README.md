@@ -111,6 +111,21 @@ live neu).
 Container-Name im Skript ist auf `goofy_mcclintock` gesetzt – bei
 abweichendem Namen (`docker ps -a`) im Skript anpassen.
 
+### Automatischer Start beim Hochfahren
+
+Eine Verknüpfung im Windows-Autostart-Ordner ruft `start-mining-dashboard.bat`
+bei jeder Anmeldung automatisch auf (minimiertes Fenster):
+
+```
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Solar Mining Dashboard.lnk
+```
+
+Das Skript wartet bis zu 5 Minuten auf Docker (kalter Boot inkl. WSL2-Start
+braucht manchmal etwas) und bis zu 2 Minuten auf n8n, bevor es aufgibt.
+Falls der PC kein Auto-Login hat, läuft es beim nächsten manuellen Login.
+
+Zum Deaktivieren: die `.lnk`-Datei im Autostart-Ordner löschen.
+
 ## Bekannte Einschränkungen
 
 - **Ocean.xyz-Werte**: nur "bisher aufgelaufen (unbezahlt)" wird angezeigt,
