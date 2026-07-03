@@ -24,7 +24,11 @@ Workflow: `workflows/solar-mining-roi-dashboard.json` (n8n Workflow SDK / Nodes)
    geparst), verwendet als Opportunitätskosten-Basis: die Miner laufen nur
    bei PV-Überschuss, "Kosten" = entgangene Einspeisevergütung, NICHT der
    Netzbezugspreis.
-7. **HTML-Report** – wird bei jedem Aufruf frisch aus allen obigen Quellen
+7. **Claude (Anthropic API)** – liest den fertigen Report als JSON und schreibt
+   eine kurze, sachliche Einschätzung (lohnt sich Mining aktuell? Haupttreiber?
+   Lottery-Chance?), landet oben im Dashboard. ~9 Sek. Laufzeit, ~0,007 $ pro
+   Aufruf bei `claude-sonnet-5`.
+8. **HTML-Report** – wird bei jedem Aufruf frisch aus allen obigen Quellen
    gebaut und über einen Webhook ausgeliefert.
 
 ## Setup
@@ -52,6 +56,7 @@ n8n-UI → Workflows → Import from File → `workflows/solar-mining-roi-dashbo
 | Home Assistant account | Home Assistant API | (aktuell ungenutzt seit History-Umstieg, kann bleiben) |
 | Home Assistant Bearer | Bearer Auth | HA REST History-API (`/api/history/period/...`) |
 | Braiins Pool API | Header Auth (`Pool-Auth-Token`) | Braiins Profile + Rewards |
+| Anthropic account | Anthropic API | KI-Einschätzung im Dashboard (Claude, Modell `claude-sonnet-5`) |
 
 Nach dem Import müssen die betroffenen HTTP-Request- und Home-Assistant-Nodes
 manuell auf die neu angelegten Credentials verweisen (n8n behält Credential-
@@ -62,6 +67,8 @@ Access Tokens, in Home Assistant erstellen.
 
 Braiins Pool Access Token: pool.braiins.com → Account Settings → API Access
 → Access Profile für BTC.
+
+Anthropic API Key: console.anthropic.com → API Keys → Create Key.
 
 **Wichtiger HA-Stolperstein:** Falls Home Assistant die Docker-IP von n8n
 wegen fehlgeschlagener Auth-Versuche blockt (401 in
