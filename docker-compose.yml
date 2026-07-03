@@ -1,12 +1,11 @@
-version: "3.8"
-
-# Mirrors the configuration of the existing local n8n container (goofy_mcclintock).
-# Use this to spin up a fresh n8n instance on another machine, or as documentation
-# of the current setup. It does NOT replace the container already running locally.
+# Production config for the local n8n instance. Bind-mounts the existing
+# Windows data directory (workflows, credentials, executions) so recreating
+# the container - e.g. after a Docker Desktop reset - is a single
+# `docker compose up -d` with zero data loss.
 services:
   n8n:
     image: n8nio/n8n
-    container_name: n8n
+    container_name: goofy_mcclintock
     restart: unless-stopped
     ports:
       - "5678:5678"
@@ -14,4 +13,4 @@ services:
       - DB_TYPE=sqlite
       - N8N_RELEASE_TYPE=stable
     volumes:
-      - ./n8n-data:/home/node/.n8n
+      - C:\Users\kraemhel\.n8n:/home/node/.n8n

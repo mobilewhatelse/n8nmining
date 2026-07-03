@@ -35,15 +35,18 @@ Workflow: `workflows/solar-mining-roi-dashboard.json` (n8n Workflow SDK / Nodes)
 
 ### 1. n8n starten
 
-Falls noch keine n8n-Instanz läuft:
-
 ```bash
 docker compose up -d
 ```
 
-Falls du bereits eine lokale n8n-Instanz nutzt (z.B. Container
-`goofy_mcclintock`), einfach diese verwenden – `docker-compose.yml` ist nur
-zur Dokumentation/Reproduktion auf einem anderen Rechner gedacht.
+`docker-compose.yml` bindet den bestehenden Windows-Datenordner
+(`C:\Users\kraemhel\.n8n`) ein, in dem Workflows, Credentials und Executions
+liegen. Das ist bewusst so gewählt: falls der Container mal komplett
+verschwindet (ist uns passiert – vermutlich durch einen Docker-Desktop-Reset,
+nicht nur gestoppt, sondern weg), stellt `docker compose up -d` ihn ohne
+Datenverlust wieder her, weil die Daten nie *im* Container lagen. `restart:
+unless-stopped` sorgt zusätzlich dafür, dass Docker ihn nach einem Docker-
+Neustart selbst wieder hochfährt.
 
 ### 2. Workflow importieren
 
@@ -111,12 +114,10 @@ http://localhost:5678/webhook/mining-dashboard
 ## Dashboard öffnen
 
 `start-mining-dashboard.bat` doppelklicken: startet Docker Desktop (falls
-nötig), startet den n8n-Container, wartet bis n8n erreichbar ist, öffnet
-dann die Dashboard-URL im Standardbrowser (der Aufruf triggert den Workflow
-live neu).
-
-Container-Name im Skript ist auf `goofy_mcclintock` gesetzt – bei
-abweichendem Namen (`docker ps -a`) im Skript anpassen.
+nötig), startet n8n über `docker compose up -d` (erstellt den Container bei
+Bedarf komplett neu, nicht nur "docker start" auf einen vorhandenen), wartet
+bis n8n erreichbar ist, öffnet dann die Dashboard-URL im Standardbrowser (der
+Aufruf triggert den Workflow live neu).
 
 ### Automatischer Start beim Hochfahren
 
@@ -132,6 +133,16 @@ braucht manchmal etwas) und bis zu 2 Minuten auf n8n, bevor es aufgibt.
 Falls der PC kein Auto-Login hat, läuft es beim nächsten manuellen Login.
 
 Zum Deaktivieren: die `.lnk`-Datei im Autostart-Ordner löschen.
+
+## Troubleshooting
+
+**Container ist nach einem Neustart komplett weg (nicht nur gestoppt).**
+Ist uns einmal passiert, vermutlich durch einen Docker-Desktop-Reset/Update.
+Da alle Daten im Windows-Ordner `C:\Users\kraemhel\.n8n` liegen (Bind-Mount,
+kein benanntes Docker-Volume), sind Workflows/Credentials/Executions davon
+nicht betroffen. Fix: `docker compose up -d` im Projektordner – erstellt den
+Container neu und mountet den bestehenden Datenordner, alles ist sofort
+wieder da. Das Startskript macht das automatisch.
 
 ## Bekannte Einschränkungen
 

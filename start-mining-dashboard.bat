@@ -5,7 +5,6 @@ REM Opening the webhook URL triggers a fresh run of the workflow.
 
 setlocal enabledelayedexpansion
 
-set CONTAINER_NAME=goofy_mcclintock
 set N8N_URL=http://localhost:5678
 set DASHBOARD_URL=%N8N_URL%/webhook/mining-dashboard
 REM Docker Desktop can take a while to fully init on a cold boot (WSL2 backend etc).
@@ -38,19 +37,19 @@ goto waitdocker
 :dockerready
 echo Docker ist bereit.
 
-REM --- 2. Start the n8n container if it isn't running yet ---
-docker ps --format "{{.Names}}" | findstr /i /x "%CONTAINER_NAME%" >nul
+REM --- 2. Start n8n via docker compose. This recreates the container from
+REM     docker-compose.yml if it's missing entirely (e.g. after a Docker
+REM     Desktop reset), not just if it's stopped - no manual fix needed.
+echo Starte n8n ueber docker compose...
+pushd "%~dp0"
+docker compose up -d
 if errorlevel 1 (
-    echo Starte n8n Container "%CONTAINER_NAME%"...
-    docker start %CONTAINER_NAME% >nul
-    if errorlevel 1 (
-        echo Konnte Container "%CONTAINER_NAME%" nicht starten. Existiert er? ^(docker ps -a^)
-        timeout /t 15 >nul
-        exit /b 1
-    )
-) else (
-    echo n8n Container laeuft bereits.
+    echo docker compose up fehlgeschlagen.
+    popd
+    timeout /t 15 >nul
+    exit /b 1
 )
+popd
 
 REM --- 3. Wait until n8n answers on localhost:5678 ---
 echo Warte auf n8n unter %N8N_URL% ...
