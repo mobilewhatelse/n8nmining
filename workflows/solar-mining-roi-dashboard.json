@@ -1,0 +1,587 @@
+{
+  "name": "Solar Mining ROI Dashboard",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "3ca8421e-5519-4fb8-8856-3d08e3e48d8d",
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ entityIds: [\"sensor.miner_avalon_nano_3s_leistung\",\"sensor.miner_avalon_nano_3s_2_leistung\",\"sensor.bitaxe1_power\",\"sensor.bitaxe2_power\",\"switch.grow_inbox_socket_2\",\"switch.grow_inbox_socket_1\",\"switch.sonoff_schalter\",\"select.miner_avalon_nano_3s_arbeitsmodus\",\"select.miner_avalon_nano_3s_2_arbeitsmodus\"], nowIso: $now.toISO(), dayAgoIso: $now.minus({ hours: 24 }).toISO(), weekAgoIso: $now.minus({ days: 7 }).toISO() }) }}",
+        "options": {}
+      },
+      "id": "2c076b84-62cf-4bf4-a905-b4b68524f231",
+      "name": "Define Time Windows & Entities",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "entityIds",
+        "include": "allOtherFields",
+        "options": {}
+      },
+      "id": "4e436ccc-cf41-4949-b321-e362ff43a80e",
+      "name": "Split Entity IDs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        448,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://192.168.5.38:8123/api/history/period/{{ $json.weekAgoIso }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filter_entity_id",
+              "value": "={{ $json.entityIds }}"
+            },
+            {
+              "name": "end_time",
+              "value": "={{ $json.nowIso }}"
+            },
+            {
+              "name": "minimal_response",
+              "value": "true"
+            },
+            {
+              "name": "no_attributes",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7e353fd7-68b8-4713-aa8e-aa66fed6d477",
+      "name": "Fetch HA Power History",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        672,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst dayAgoMs = Date.now() - 24 * 60 * 60 * 1000;\nconst ON_THRESHOLD_W = 5; // fallback only, used when no switch entity exists (BitAxe #1 lottery)\n\nconst toPoints = (entries) => entries\n  .map((e) => ({ t: new Date(e.last_changed).getTime(), state: e.state }))\n  .filter((p) => Number.isFinite(p.t))\n  .sort((a, b) => a.t - b.t);\n\nconst dayFilter = (points) => points.filter((p) => p.t >= dayAgoMs);\n\nconst integrateKWh = (points) => {\n  let wattSeconds = 0;\n  for (let i = 1; i < points.length; i++) {\n    const w0 = parseFloat(points[i - 1].state);\n    const w1 = parseFloat(points[i].state);\n    if (!Number.isFinite(w0) || !Number.isFinite(w1)) continue;\n    const dtSeconds = (points[i].t - points[i - 1].t) / 1000;\n    wattSeconds += ((w0 + w1) / 2) * dtSeconds;\n  }\n  return wattSeconds / 3600000; // Ws -> kWh\n};\n\nconst wattThresholdRuntimeHours = (points) => {\n  let seconds = 0;\n  for (let i = 1; i < points.length; i++) {\n    const w0 = parseFloat(points[i - 1].state);\n    if (Number.isFinite(w0) && w0 > ON_THRESHOLD_W) {\n      seconds += (points[i].t - points[i - 1].t) / 1000;\n    }\n  }\n  return seconds / 3600;\n};\n\nconst switchRuntimeHours = (points) => {\n  let seconds = 0;\n  for (let i = 1; i < points.length; i++) {\n    if (points[i - 1].state === 'on') {\n      seconds += (points[i].t - points[i - 1].t) / 1000;\n    }\n  }\n  return seconds / 3600;\n};\n\nconst BRAIINS_ENTITY_IDS = [\n  'sensor.miner_avalon_nano_3s_leistung',\n  'sensor.miner_avalon_nano_3s_2_leistung',\n  'sensor.bitaxe2_power'\n];\nconst LOTTERY_ENTITY_IDS = ['sensor.bitaxe1_power'];\n\n// Which switch entity gates which power sensor's real runtime\nconst SWITCH_FOR_SENSOR = {\n  'sensor.miner_avalon_nano_3s_leistung': 'switch.grow_inbox_socket_2',\n  'sensor.miner_avalon_nano_3s_2_leistung': 'switch.grow_inbox_socket_1',\n  'sensor.bitaxe2_power': 'switch.sonoff_schalter'\n};\n\nconst raw = {};\nfor (const item of items) {\n  const data = item.json;\n  const entries = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);\n  const entityId = entries[0]?.entity_id;\n  if (!entityId) continue;\n  raw[entityId] = toPoints(entries);\n}\n\nconst powerSensorIds = [...BRAIINS_ENTITY_IDS, ...LOTTERY_ENTITY_IDS];\nconst minerResults = powerSensorIds.map((entityId) => {\n  const points = raw[entityId] || [];\n  const dayPoints = dayFilter(points);\n  const pool = BRAIINS_ENTITY_IDS.includes(entityId) ? 'braiins' : 'lottery';\n\n  const switchEntityId = SWITCH_FOR_SENSOR[entityId];\n  const switchPoints = switchEntityId ? (raw[switchEntityId] || []) : [];\n  const daySwitchPoints = dayFilter(switchPoints);\n\n  const runtimeHours24h = switchEntityId ? switchRuntimeHours(daySwitchPoints) : wattThresholdRuntimeHours(dayPoints);\n  const runtimeHours7d = switchEntityId ? switchRuntimeHours(switchPoints) : wattThresholdRuntimeHours(points);\n\n  return {\n    entityId,\n    pool,\n    kWh24h: integrateKWh(dayPoints),\n    kWh7d: integrateKWh(points),\n    runtimeHours24h,\n    runtimeHours7d,\n    runtimeSource: switchEntityId ? switchEntityId : 'watt-threshold'\n  };\n});\n\nconst sumBy = (arr, key) => arr.reduce((sum, m) => sum + m[key], 0);\nconst braiinsMiners = minerResults.filter((m) => m.pool === 'braiins');\nconst lotteryMiners = minerResults.filter((m) => m.pool === 'lottery');\n\nconst latestState = (entityId) => {\n  const points = raw[entityId] || [];\n  return points.length ? points[points.length - 1].state : null;\n};\n\nreturn [{\n  json: {\n    perMiner: minerResults,\n    braiins: {\n      kWh24h: sumBy(braiinsMiners, 'kWh24h'),\n      kWh7d: sumBy(braiinsMiners, 'kWh7d')\n    },\n    lottery: {\n      kWh24h: sumBy(lotteryMiners, 'kWh24h'),\n      kWh7d: sumBy(lotteryMiners, 'kWh7d')\n    },\n    modes: {\n      avalon1: latestState('select.miner_avalon_nano_3s_arbeitsmodus'),\n      avalon2: latestState('select.miner_avalon_nano_3s_2_arbeitsmodus')\n    }\n  }\n}];"
+      },
+      "id": "50ab3dc6-6fe8-4b02-9018-63692f9b4017",
+      "name": "Calculate Energy Consumption (kWh)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://pool.braiins.com/accounts/profile/json/btc",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "03732072-e1c0-4b29-8ca4-e509a3bcaf7c",
+      "name": "Get Braiins Profile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://pool.braiins.com/accounts/rewards/json/btc",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "f4de9f40-8dd8-4221-9c1e-09aab519beea",
+      "name": "Get Braiins Daily Rewards",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1344,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.coingecko.com/api/v3/simple/price",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "ids",
+              "value": "bitcoin"
+            },
+            {
+              "name": "vs_currencies",
+              "value": "eur"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6b576f02-fb34-42e9-b57d-a5d752f65826",
+      "name": "Get BTC Price",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1568,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const energy = $('Calculate Energy Consumption (kWh)').first().json;\nconst profileRaw = $('Get Braiins Profile').first().json;\nconst rewardsRaw = $('Get Braiins Daily Rewards').first().json;\nconst priceRaw = $('Get BTC Price').first().json;\nconst lotteryRaw = $('Get Powermining Lottery Stats').first().json;\nconst networkRaw = $('Get Network Difficulty').first().json;\nconst oceanRaw = $('Parse Ocean Stats').first().json;\nconst feedInRaw = $('Parse Feed-in Tariff').first().json;\n\nconst profile = profileRaw.btc ?? profileRaw;\nconst rewardsList = Array.isArray(rewardsRaw)\n  ? rewardsRaw\n  : (rewardsRaw.btc?.daily_rewards ?? rewardsRaw.daily_rewards ?? []);\n\nconst btcPriceEur = priceRaw?.bitcoin?.eur ?? 0;\n// Opportunity cost, not a real cash cost: this is the aWATTar SUNNY feed-in tariff you'd\n// have earned by exporting this solar surplus instead of using it to mine.\nconst feedInTariffEurPerKWh = feedInRaw?.feedInTariffEurPerKWh ?? 0.1349;\nconst toNum = (v) => parseFloat(v) || 0;\nconst toSats = (btc) => Math.round((btc ?? 0) * 1e8);\n\n// --- Day (rolling 24h) -- Braiins-Miner: Avalon #1+#2, BitAxe #2 ---\nconst dayKWh = energy.braiins.kWh24h;\nconst dayForegoneFeedInEur = dayKWh * feedInTariffEurPerKWh;\nconst dayRewardBtc = toNum(profile.today_reward);\nconst dayRewardSats = toSats(dayRewardBtc);\nconst dayEarningsEur = dayRewardBtc * btcPriceEur;\nconst dayAdvantageEur = dayEarningsEur - dayForegoneFeedInEur;\nconst dayRoiPct = dayForegoneFeedInEur > 0 ? (dayAdvantageEur / dayForegoneFeedInEur) * 100 : null;\n\n// --- Week (rolling 7 days) ---\nconst weekKWh = energy.braiins.kWh7d;\nconst weekForegoneFeedInEur = weekKWh * feedInTariffEurPerKWh;\nconst last7 = rewardsList.slice(0, 7);\nconst weekRewardBtc = last7.reduce((sum, entry) => sum + toNum(entry.total_reward), 0);\nconst weekRewardSats = toSats(weekRewardBtc);\nconst weekEarningsEur = weekRewardBtc * btcPriceEur;\nconst weekAdvantageEur = weekEarningsEur - weekForegoneFeedInEur;\nconst weekRoiPct = weekForegoneFeedInEur > 0 ? (weekAdvantageEur / weekForegoneFeedInEur) * 100 : null;\n\n// --- Year projection (365 days), based on the last 7 days' daily average ---\nconst avgDailyKWh = weekKWh / 7;\nconst avgDailyRewardBtc = weekRewardBtc / 7;\nconst yearKWh = avgDailyKWh * 365;\nconst yearForegoneFeedInEur = yearKWh * feedInTariffEurPerKWh;\nconst yearRewardBtc = avgDailyRewardBtc * 365;\n\nconst scenario = (priceMultiplier) => {\n  const price = btcPriceEur * priceMultiplier;\n  const earnings = yearRewardBtc * price;\n  const advantage = earnings - yearForegoneFeedInEur;\n  return {\n    btcPriceEur: price,\n    earningsEur: earnings,\n    profitEur: advantage,\n    roiPct: yearForegoneFeedInEur > 0 ? (advantage / yearForegoneFeedInEur) * 100 : null\n  };\n};\n\n// --- Lottery-Miner: BitAxe #1, solo auf pool.powermining.io ---\nconst networkDifficulty = networkRaw?.difficulty ?? 0;\nconst lotteryBestDifficulty = toNum(lotteryRaw?.bestDifficulty);\nconst lotteryKWh24h = energy.lottery.kWh24h;\nconst lotteryKWh7d = energy.lottery.kWh7d;\nconst lotteryBlockFound = networkDifficulty > 0 && lotteryBestDifficulty >= networkDifficulty;\nconst lotteryDifficultyRatio = lotteryBestDifficulty > 0 ? networkDifficulty / lotteryBestDifficulty : null;\nconst currentBlockSubsidyBtc = 3.125;\n\n// --- Braiins Konto insgesamt ---\nconst allTimeRewardBtc = toNum(profile.all_time_reward);\nconst accountBalanceBtc = toNum(profile.current_balance);\n// all_time_reward = everything ever earned (paid + still pending); current_balance = still pending/unpaid.\n// So what has actually been paid out to the wallet so far is the difference.\nconst paidOutBtc = Math.max(0, allTimeRewardBtc - accountBalanceBtc);\nconst paidOutEur = paidOutBtc * btcPriceEur;\n\nreturn [{\n  json: {\n    assumptions: {\n      feedInTariffEurPerKWh,\n      feedInTariffCentPerKWh: feedInRaw?.feedInTariffCentPerKWh ?? null,\n      btcPriceEur,\n      note: 'Kosten = entgangene Einspeiseverguetung (aWATTar SUNNY Tarif), NICHT der Netzbezugspreis, da die Miner nur PV-Ueberschuss nutzen. Jahresprognose basiert auf dem Tagesdurchschnitt der letzten 7 Tage (nur Braiins-Miner: Avalon #1+#2, BitAxe #2), hochgerechnet auf 365 Tage. Keine Saisonalitaet beruecksichtigt. BitAxe #2 laeuft zeitweise auf Ocean statt Braiins - dessen kWh sind hier trotzdem komplett der Braiins-Zeile zugerechnet, da der genaue zeitliche Split nicht bekannt ist.'\n    },\n    braiinsAccountTotal: {\n      allTimeRewardSats: toSats(allTimeRewardBtc),\n      allTimeRewardBtc,\n      currentBalanceSats: toSats(accountBalanceBtc),\n      currentBalanceBtc: accountBalanceBtc,\n      paidOutSats: toSats(paidOutBtc),\n      paidOutBtc,\n      paidOutEur\n    },\n    day: { kWh: dayKWh, costEur: dayForegoneFeedInEur, rewardSats: dayRewardSats, rewardBtc: dayRewardBtc, earningsEur: dayEarningsEur, profitEur: dayAdvantageEur, roiPct: dayRoiPct },\n    week: { kWh: weekKWh, costEur: weekForegoneFeedInEur, rewardSats: weekRewardSats, rewardBtc: weekRewardBtc, earningsEur: weekEarningsEur, profitEur: weekAdvantageEur, roiPct: weekRoiPct },\n    year: {\n      kWh: yearKWh,\n      costEur: yearForegoneFeedInEur,\n      rewardBtc: yearRewardBtc,\n      rewardSats: toSats(yearRewardBtc),\n      scenarios: { bearish: scenario(0.7), base: scenario(1.0), bullish: scenario(1.3) }\n    },\n    lottery: {\n      note: 'BitAxe #1 minted solo auf pool.powermining.io - kein laufender Ertrag, nur Blockchance.',\n      address: 'bc1qfm6wv0ggw00df2lqc8ck27aansztsrv8k3lw22',\n      kWh24h: lotteryKWh24h,\n      kWh7d: lotteryKWh7d,\n      costEur24h: lotteryKWh24h * feedInTariffEurPerKWh,\n      costEur7d: lotteryKWh7d * feedInTariffEurPerKWh,\n      bestDifficultyEver: lotteryBestDifficulty,\n      networkDifficulty,\n      blockFound: lotteryBlockFound,\n      difficultyRatio: lotteryDifficultyRatio,\n      potentialBlockValueEur: currentBlockSubsidyBtc * btcPriceEur\n    },\n    oceanBitaxe2: {\n      note: 'BitAxe #2 laeuft zeitweise auf mine.ocean.xyz statt Braiins - zusaetzlich zur Braiins-Zeile. Nur der verifizierte Wert (bisher aufgelaufen/unbezahlt) wird gezeigt, die anderen Ocean-Felder waren nicht zuverlaessig auslesbar.',\n      address: 'bc1qfm6wv0ggw00df2lqc8ck27aansztsrv8k3lw22',\n      unpaidEarningsSats: toSats(oceanRaw.unpaidEarningsBtc)\n    },\n    modes: energy.modes,\n    perMiner: energy.perMiner\n  }\n}];"
+      },
+      "id": "e5e2467b-155e-4e7b-b7f1-1bac06117b49",
+      "name": "Calculate ROI Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 1. Home Assistant: Stromverbrauch\nHolt die Leistungs-Historie (W) der 4 Miner der letzten 7 Tage aus HA und integriert sie per Trapezregel zu kWh (rollierend 24h und 7 Tage).",
+        "height": 200,
+        "width": 300,
+        "color": 4
+      },
+      "id": "e24add79-0b60-4f7b-b35b-281dbfae1857",
+      "name": "Sticky Note cdd7c80c",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -256
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 2. Braiins Pool & BTC-Kurs\nMining-Ertrag direkt aus dem Braiins-Dashboard (Profile + taegliche Rewards) sowie aktueller BTC/EUR-Kurs von CoinGecko.",
+        "height": 200,
+        "width": 300,
+        "color": 5
+      },
+      "id": "8947e2ef-1d0e-4621-b145-a127728b584a",
+      "name": "Sticky Note 960b78b1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 3. ROI Report\nTag/Woche: reale Werte. Jahresprognose: Tagesdurchschnitt der letzten 7 Tage x 365, inkl. Sensitivitaet bei +/-30% BTC-Kurs (bearish/bullish). Stromkosten: 0,1349 EUR/kWh.",
+        "height": 200,
+        "width": 300,
+        "color": 3
+      },
+      "id": "0ae632eb-7ce4-4397-92aa-45c1dd48940a",
+      "name": "Sticky Note 92816f8d",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        304,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://pool.powermining.io:40557/api/client/bc1qfm6wv0ggw00df2lqc8ck27aansztsrv8k3lw22",
+        "options": {}
+      },
+      "id": "c6174883-c5db-4e04-b79d-a68551533d63",
+      "name": "Get Powermining Lottery Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1568,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://pool.powermining.io:40557/api/network",
+        "options": {}
+      },
+      "id": "208fe5c1-4a4f-4164-b8cf-26587e45ee7f",
+      "name": "Get Network Difficulty",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1568,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Lottery-Check: BitAxe #1\nBitAxe #1 minted solo auf pool.powermining.io (Adresse siehe Report). Kein laufender Ertrag - hier wird nur geprueft, ob ein Block gefunden wurde (bestDifficulty vs. aktuelle Netzwerk-Difficulty).",
+        "height": 180,
+        "width": 300,
+        "color": 6
+      },
+      "id": "ddc1b595-ca73-4cb7-a60e-c132eb3e0dc7",
+      "name": "Sticky Note Lottery",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1728,
+        288
+      ]
+    },
+    {
+      "id": "d61250b2-bf65-4287-ac30-f162877e42cf",
+      "name": "Get Ocean Stats Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1792,
+        220
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://ocean.xyz/stats/bc1qfm6wv0ggw00df2lqc8ck27aansztsrv8k3lw22",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "c85612aa-7572-4135-b8b1-d6a14b4f32a7",
+      "name": "Parse Ocean Stats",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2016,
+        220
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const extractBtc = (html, label) => {\n  const escaped = label.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n  const re = new RegExp(escaped + '[\\\\s\\\\S]{0,400}?<span>\\\\s*([0-9.]+)\\\\s*BTC<\\\\/span>', 'i');\n  const m = html.match(re);\n  return m ? parseFloat(m[1]) : null;\n};\n\nconst html = $input.first().json.data ?? '';\n\nreturn [{\n  json: {\n    estimatedRewardsInWindowBtc: extractBtc(html, 'Estimated Rewards In Window'),\n    estimatedEarningsNextBlockBtc: extractBtc(html, 'Estimated Earnings Next Block'),\n    estimatedEarningsPerDayBtc: extractBtc(html, 'Estimated Earnings Per Day'),\n    lifetimeEarningsBtc: extractBtc(html, 'Lifetime Earnings'),\n    unpaidEarningsBtc: extractBtc(html, 'Unpaid Earnings'),\n    estimatedPayoutNextBlockBtc: extractBtc(html, 'Estimated Payout Next Block')\n  }\n}];"
+      }
+    },
+    {
+      "id": "7a92b690-f5a5-4d52-b30f-4b864feff10a",
+      "name": "Dashboard Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        260
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "mining-dashboard",
+        "authentication": "none",
+        "responseMode": "responseNode"
+      },
+      "webhookId": "e4e14192-7a40-44e1-b82c-4b04e05f9c09"
+    },
+    {
+      "id": "8520e5a9-5131-4450-876d-8befb7575fc2",
+      "name": "Build HTML Dashboard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const r = $input.first().json;\nconst fmtEur = (n) => (n ?? 0).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' EUR';\nconst fmtSats = (n) => (n ?? 0).toLocaleString('de-DE') + ' Sats';\nconst fmtKwh = (n) => (n ?? 0).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' kWh';\nconst fmtH = (n) => (n ?? 0).toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' h';\nconst fmtPct = (n) => (n === null || n === undefined) ? '-' : n.toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' %';\nconst advClass = (n) => (n ?? 0) >= 0 ? 'pos' : 'neg';\nconst tariff = r.assumptions.feedInTariffCentPerKWh ?? '?';\n\nconst minerRows = r.perMiner.map((m) => `\n  <tr>\n    <td>${m.entityId}</td>\n    <td>${m.pool === 'braiins' ? 'Braiins' : 'Lottery'}</td>\n    <td>${fmtKwh(m.kWh24h)}</td>\n    <td>${fmtH(m.runtimeHours24h)}</td>\n    <td>${fmtKwh(m.kWh7d)}</td>\n    <td>${fmtH(m.runtimeHours7d)}</td>\n  </tr>`).join('');\n\nconst compareRow = (label, period) => `\n  <tr>\n    <td>${label}</td>\n    <td>${fmtKwh(period.kWh)}</td>\n    <td>${fmtEur(period.costEur)}</td>\n    <td>${fmtSats(period.rewardSats)}<br><span class=\"note\" style=\"margin:0\">${fmtEur(period.earningsEur)}</span></td>\n    <td class=\"${advClass(period.profitEur)}\">${fmtEur(period.profitEur)}</td>\n  </tr>`;\n\nconst html = `<!DOCTYPE html>\n<html lang=\"de\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Solar Mining ROI Dashboard</title>\n<style>\n  :root { color-scheme: dark; }\n  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: #0f1115; color: #e6e8eb; margin: 0; padding: 24px; }\n  .wrap { max-width: 960px; margin: 0 auto; }\n  h1 { font-size: 1.6rem; margin-bottom: 4px; }\n  .sub { color: #8a93a3; margin-bottom: 24px; font-size: 0.9rem; }\n  .card { background: #171a21; border: 1px solid #262b36; border-radius: 12px; padding: 20px; margin-bottom: 20px; }\n  .card h2 { margin-top: 0; font-size: 1.15rem; }\n  table { width: 100%; border-collapse: collapse; margin-top: 8px; }\n  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #262b36; font-size: 0.88rem; vertical-align: top; }\n  th { color: #8a93a3; font-weight: 600; }\n  .pos { color: #4ade80; font-weight: 600; }\n  .neg { color: #f87171; font-weight: 600; }\n  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }\n  @media (max-width: 700px) { .grid3 { grid-template-columns: 1fr; } table { display: block; overflow-x: auto; white-space: nowrap; } }\n  .stat { background: #12151b; border-radius: 8px; padding: 14px; }\n  .stat .label { color: #8a93a3; font-size: 0.75rem; text-transform: uppercase; letter-spacing: .04em; }\n  .stat .value { font-size: 1.3rem; font-weight: 700; margin-top: 4px; }\n  .note { color: #8a93a3; font-size: 0.85rem; margin-top: 10px; }\n  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; vertical-align: middle; margin-left: 8px; }\n  .pill.found { background: rgba(74,222,128,0.2); color: #4ade80; }\n  .pill.notfound { background: rgba(248,113,113,0.2); color: #f87171; }\n  code { background: #12151b; padding: 2px 6px; border-radius: 4px; font-size: 0.82rem; }\n</style>\n</head>\n<body>\n<div class=\"wrap\">\n  <h1>Solar Mining ROI Dashboard</h1>\n  <div class=\"sub\">Stand: ${new Date().toLocaleString('de-DE')} &middot; Einspeiseverguetung (aWATTar SUNNY, live): ${tariff} Cent/kWh &middot; BTC-Kurs (live): ${fmtEur(r.assumptions.btcPriceEur)}</div>\n\n  <div class=\"card\">\n    <h2>Braiins-Miner (Avalon #1+#2, BitAxe #2)</h2>\n    <div class=\"grid3\">\n      <div class=\"stat\"><div class=\"label\">Ausbezahlt (all-time)</div><div class=\"value\">${fmtSats(r.braiinsAccountTotal.paidOutSats)}</div><div class=\"note\">${fmtEur(r.braiinsAccountTotal.paidOutEur)} zum aktuellen Kurs</div></div>\n      <div class=\"stat\"><div class=\"label\">Aktuell unbezahlt</div><div class=\"value\">${fmtSats(r.braiinsAccountTotal.currentBalanceSats)}</div></div>\n      <div class=\"stat\"><div class=\"label\">Insgesamt verdient (all-time)</div><div class=\"value\">${fmtSats(r.braiinsAccountTotal.allTimeRewardSats)}</div></div>\n    </div>\n    <div class=\"note\" style=\"margin-top:16px;\">\"Einspeisung waere gewesen\" = PV-kWh x aktueller aWATTar-Tarif. \"Mining-Ertrag\" = Sats x aktueller BTC-Kurs. Beides wird bei jedem Aufruf frisch geholt.</div>\n    <table>\n      <tr><th></th><th>PV-Strom genutzt</th><th>Einspeisung waere gewesen<br><small>bei ${tariff} Cent/kWh</small></th><th>Mining hat eingebracht<br><small>bei aktuellem BTC-Kurs</small></th><th>Differenz</th></tr>\n      ${compareRow('Heute (24h)', r.day)}\n      ${compareRow('Woche (7 Tage)', r.week)}\n      ${compareRow('Jahr (Prognose, base)', { kWh: r.year.kWh, costEur: r.year.costEur, rewardSats: r.year.rewardSats, earningsEur: r.year.scenarios.base.earningsEur, profitEur: r.year.scenarios.base.profitEur })}\n    </table>\n    <div class=\"note\" style=\"margin-top:16px;\">Jahresprognose bei anderem BTC-Kurs (Sats-Menge bleibt gleich, nur der Kurs aendert sich):</div>\n    <table>\n      <tr><th>Szenario</th><th>BTC-Kurs</th><th>Mining hat eingebracht</th><th>Differenz zur Einspeisung</th><th>%</th></tr>\n      <tr><td>Bearish (-30%)</td><td>${fmtEur(r.year.scenarios.bearish.btcPriceEur)}</td><td>${fmtEur(r.year.scenarios.bearish.earningsEur)}</td><td class=\"${advClass(r.year.scenarios.bearish.profitEur)}\">${fmtEur(r.year.scenarios.bearish.profitEur)}</td><td>${fmtPct(r.year.scenarios.bearish.roiPct)}</td></tr>\n      <tr><td>Base</td><td>${fmtEur(r.year.scenarios.base.btcPriceEur)}</td><td>${fmtEur(r.year.scenarios.base.earningsEur)}</td><td class=\"${advClass(r.year.scenarios.base.profitEur)}\">${fmtEur(r.year.scenarios.base.profitEur)}</td><td>${fmtPct(r.year.scenarios.base.roiPct)}</td></tr>\n      <tr><td>Bullish (+30%)</td><td>${fmtEur(r.year.scenarios.bullish.btcPriceEur)}</td><td>${fmtEur(r.year.scenarios.bullish.earningsEur)}</td><td class=\"${advClass(r.year.scenarios.bullish.profitEur)}\">${fmtEur(r.year.scenarios.bullish.profitEur)}</td><td>${fmtPct(r.year.scenarios.bullish.roiPct)}</td></tr>\n    </table>\n  </div>\n\n  <div class=\"card\">\n    <h2>Lottery-Check: BitAxe #1<span class=\"pill ${r.lottery.blockFound ? 'found' : 'notfound'}\">${r.lottery.blockFound ? 'BLOCK GEFUNDEN!' : 'Kein Block'}</span></h2>\n    <div class=\"note\">Solo auf pool.powermining.io &middot; Adresse <code>${r.lottery.address}</code></div>\n    <div class=\"grid3\">\n      <div class=\"stat\"><div class=\"label\">Beste Difficulty (all-time)</div><div class=\"value\">${Math.round(r.lottery.bestDifficultyEver).toLocaleString('de-DE')}</div></div>\n      <div class=\"stat\"><div class=\"label\">Netzwerk-Difficulty</div><div class=\"value\">${Math.round(r.lottery.networkDifficulty).toLocaleString('de-DE')}</div></div>\n      <div class=\"stat\"><div class=\"label\">Faktor entfernt</div><div class=\"value\">${r.lottery.difficultyRatio ? Math.round(r.lottery.difficultyRatio).toLocaleString('de-DE') + 'x' : '-'}</div></div>\n    </div>\n    <div class=\"note\">PV-Strom genutzt: ${fmtKwh(r.lottery.kWh24h)}/Tag, ${fmtKwh(r.lottery.kWh7d)}/Woche (Einspeisung waere gewesen: ${fmtEur(r.lottery.costEur24h)}/${fmtEur(r.lottery.costEur7d)}). Falls Block gefunden: ~${fmtEur(r.lottery.potentialBlockValueEur)}.</div>\n  </div>\n\n  <div class=\"card\">\n    <h2>Ocean.xyz: BitAxe #2 (zeitweise)</h2>\n    <div class=\"note\">Laeuft manchmal zusaetzlich auf mine.ocean.xyz statt Braiins &middot; Adresse <code>${r.oceanBitaxe2.address}</code> &middot; zusaetzlich zur Braiins-Zeile oben</div>\n    <div class=\"stat\" style=\"max-width: 260px;\"><div class=\"label\">Bisher aufgelaufen (unbezahlt)</div><div class=\"value\">${fmtSats(r.oceanBitaxe2.unpaidEarningsSats)}</div></div>\n  </div>\n\n  <div class=\"card\">\n    <h2>Miner im Detail</h2>\n    <table>\n      <tr><th>Entity</th><th>Pool</th><th>kWh 24h</th><th>Laufzeit 24h</th><th>kWh 7d</th><th>Laufzeit 7d</th></tr>\n      ${minerRows}\n    </table>\n    <div class=\"note\">Arbeitsmodus Avalon #1: <code>${r.modes.avalon1 ?? '-'}</code> &middot; Avalon #2: <code>${r.modes.avalon2 ?? '-'}</code></div>\n    <div class=\"note\">Laufzeiten fuer Avalon #1/#2 und BitAxe #2 stammen aus den Steckdosen-Schaltern (Ein/Aus), BitAxe #1 aus einer Watt-Schwelle (laeuft unkontrolliert durch).</div>\n  </div>\n\n  <div class=\"note\">${r.assumptions.note}</div>\n</div>\n</body>\n</html>`;\n\nreturn [{ json: { html } }];"
+      }
+    },
+    {
+      "id": "a470c288-dc22-4201-ad10-c654a8f412ff",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2464,
+        0
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          },
+          "enableStreaming": false
+        }
+      }
+    },
+    {
+      "id": "8e3bf739-2f1a-4420-9132-4c61017f4221",
+      "name": "Get aWATTar Sunny Tariff",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2240,
+        220
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.awattar.at/tariffs/sunny",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "6902c77d-608f-4370-841c-cb2356dee225",
+      "name": "Parse Feed-in Tariff",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2464,
+        220
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const html = $input.first().json.data ?? '';\nconst m = html.match(/([0-9]+,[0-9]+)\\s*Cent\\/kWh/);\nconst cent = m ? parseFloat(m[1].replace(',', '.')) : null;\n\nreturn [{\n  json: {\n    feedInTariffCentPerKWh: cent,\n    feedInTariffEurPerKWh: cent !== null ? cent / 100 : null\n  }\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Define Time Windows & Entities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Define Time Windows & Entities": {
+      "main": [
+        [
+          {
+            "node": "Split Entity IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Entity IDs": {
+      "main": [
+        [
+          {
+            "node": "Fetch HA Power History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch HA Power History": {
+      "main": [
+        [
+          {
+            "node": "Calculate Energy Consumption (kWh)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Energy Consumption (kWh)": {
+      "main": [
+        [
+          {
+            "node": "Get Braiins Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Braiins Profile": {
+      "main": [
+        [
+          {
+            "node": "Get Braiins Daily Rewards",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Braiins Daily Rewards": {
+      "main": [
+        [
+          {
+            "node": "Get BTC Price",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get BTC Price": {
+      "main": [
+        [
+          {
+            "node": "Get Powermining Lottery Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Powermining Lottery Stats": {
+      "main": [
+        [
+          {
+            "node": "Get Network Difficulty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Network Difficulty": {
+      "main": [
+        [
+          {
+            "node": "Get Ocean Stats Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Ocean Stats Page": {
+      "main": [
+        [
+          {
+            "node": "Parse Ocean Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dashboard Webhook": {
+      "main": [
+        [
+          {
+            "node": "Define Time Windows & Entities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate ROI Report": {
+      "main": [
+        [
+          {
+            "node": "Build HTML Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build HTML Dashboard": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Ocean Stats": {
+      "main": [
+        [
+          {
+            "node": "Get aWATTar Sunny Tariff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get aWATTar Sunny Tariff": {
+      "main": [
+        [
+          {
+            "node": "Parse Feed-in Tariff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Feed-in Tariff": {
+      "main": [
+        [
+          {
+            "node": "Calculate ROI Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "instructions": "Credentials must be recreated manually after import: Home Assistant API, Home Assistant Bearer, Braiins Pool API (Header Auth)."
+  }
+}

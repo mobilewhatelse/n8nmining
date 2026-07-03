@@ -1,0 +1,17 @@
+version: "3.8"
+
+# Mirrors the configuration of the existing local n8n container (goofy_mcclintock).
+# Use this to spin up a fresh n8n instance on another machine, or as documentation
+# of the current setup. It does NOT replace the container already running locally.
+services:
+  n8n:
+    image: n8nio/n8n
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - DB_TYPE=sqlite
+      - N8N_RELEASE_TYPE=stable
+    volumes:
+      - ./n8n-data:/home/node/.n8n
